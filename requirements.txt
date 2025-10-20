@@ -1,0 +1,43 @@
+# ============================== SAM2 ==============================
+numpy==1.26.3
+tqdm
+hydra-core
+iopath==0.1.10
+pillow==10.2.0
+h5py
+
+huggingface_hub
+
+-e segment-anything-2
+
+# ============================= ProcGen =============================
+procgen @ https://github.com/kaixin96/procgen-pyramid/releases/download/0.10.7/procgen-0.10.7+224x224-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+minari[create]==0.5.0
+gym==0.23.0
+
+# ============================== SOLV ==============================
+timm==1.0.8
+scipy==1.14.0
+scikit-learn==1.5.1
+torch --index-url https://download.pytorch.org/whl/cu121
+torchvision --index-url https://download.pytorch.org/whl/cu121
+tyro
+mlflow
+azureml-mlflow
+tensorboard
+transformers
+xformers --index-url https://download.pytorch.org/whl/cu121
+
+# ============================== Cosmos ==============================
+loguru>=0.7.0
+mediapy==1.1.6
+einops
+einx
+
+-e encoder/cosmos
+
+# ============================== Mamba ==============================
+mamba-ssm[causal-conv1d]
+
+# ============================== Misc ==============================
+numba==0.60.0
