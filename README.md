@@ -48,8 +48,22 @@ python ppg_rollout_minari.py \
     --num_levels 0 \
     --distribution_mode hard
 ```
+Afterwards, preprocess training, validation, and test data with SAM. You can use multiple gpu for faster preprocessing by specifying `--cuda_ids`.
+```
+ENV_ID=bigfish
+DATA_SAVE_PATH="/path/to/save/data"
+
+for data_version in 0 1 2
+do
+    python segment-anything-2/video_track_all_obj.py \
+        --data_path ${DATA_SAVE_PATH}/procgen-${ENV_ID}-v${data_version} \
+        --cuda_ids 0
+done
+```
 
 ## Training
+
+If you encouter any error complaining missing episodes in `sam_masks.h5`, rerun the above preprocessing script. There is no need to remove existing `sam_masks.h5`, the script will resume from the existing file and only preprocess the missing episodes.
 ```
 # train encoder
 ./train_encoder.sh
