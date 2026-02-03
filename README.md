@@ -61,6 +61,16 @@ do
 done
 ```
 
+## Prepare Cosmos Tokenizer
+
+Download [Cosmos Tokenizer Weight](https://huggingface.co/nvidia/Cosmos-0.1-Tokenizer-CI16x16) to 
+```
+├── encoder/cosmos/pretrained_ckpts/Cosmos-0.1-Tokenizer-DI16x16/
+│   ├── encoder.jit
+│   ├── decoder.jit
+│   ├── autoencoder.jit
+```
+
 ## Training
 
 If you encouter any error complaining missing episodes in `sam_masks.h5`, rerun the above preprocessing script. There is no need to remove existing `sam_masks.h5`, the script will resume from the existing file and only preprocess the missing episodes.
