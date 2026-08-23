@@ -9,6 +9,10 @@ class SolvSamConfig:
     exp_name: str = "encoder_test"
     run_name: str = "test"
 
+    # Experiment tracking backend. "auto" keeps the historical behaviour of using wandb
+    # when it is importable and falling back to mlflow otherwise.
+    logger: Literal["auto", "wandb", "comet", "mlflow"] = "auto"
+
     # === Data Related Parameters ===
     dataset: str = "procgen_minari"
     root: str = field(default="/scratch/cluster/zzwang_new/procgen_data")
@@ -27,6 +31,14 @@ class SolvSamConfig:
         "dinov2-vitb-14", "mae-vitb-16",
         "Cosmos-0.1-Tokenizer-CI8x8", "Cosmos-0.1-Tokenizer-CI16x16",
     ] = "Cosmos-0.1-Tokenizer-CI16x16"
+
+    # === SAM Mask Related Parameters ===
+    # When False, sam_masks.h5 is never read and the encoder trains fully unsupervised:
+    # slot attention gets no mask, the attention loss is disabled and the RGB loss covers
+    # every pixel. Segmentation metrics need ground truth, so they are unavailable.
+    # Deliberately not called use_sam_mask: that name exists in the inference-side config
+    # and the two are compared by common key when a checkpoint is loaded.
+    load_sam_masks: bool = True
 
     # === Slot Attention Related Parameters ===
     num_slots: int = 47
@@ -87,3 +99,27 @@ class SolvSamConfig:
         assert self.log_schedule_k > 0
         assert self.schedule_start_epoch < self.schedule_end_epoch
         assert 0 <= self.no_drop_ratio <= 1
+
+        if not self.load_sam_masks:
+            if self.decode_segmentation:
+                raise ValueError(
+                    "decode_segmentation needs ground-truth masks as its target; "
+                    "it cannot be combined with load_sam_masks=False."
+                )
+
+            # every mask-dependent knob defaults to a value that assumes masks exist, so
+            # override them rather than forcing the caller to repeat the whole combination
+            overridden = {}
+            if self.encode_use_mask:
+                overridden["encode_use_mask"] = False
+            if self.decode_use_mask:
+                overridden["decode_use_mask"] = False
+            if self.attn_loss_weight != 0.0:
+                overridden["attn_loss_weight"] = 0.0
+            if self.no_drop_ratio != 1.0:
+                overridden["no_drop_ratio"] = 1.0
+
+            for name, value in overridden.items():
+                setattr(self, name, value)
+            if overridden:
+                print(f"load_sam_masks=False, overriding {overridden}")

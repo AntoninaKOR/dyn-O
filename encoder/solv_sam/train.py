@@ -11,12 +11,6 @@ from typing import Tuple
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
 
-try:
-    import wandb
-    wandb_available = True
-except:
-    wandb_available = False
-
 import numpy as np
 
 from tqdm import tqdm
@@ -32,6 +26,10 @@ import torch.distributed as dist
 import utils
 from models.model import SOLV_SAM, DinoEncoder, CosmosEncoder
 from config import SolvSamConfig
+from run_logger import CometLogger, MlflowLogger, RunLogger, WandbLogger, resolve_backend
+
+# Set in __main__ before main_worker runs; ranks that must stay quiet keep the no-op base.
+run_logger: RunLogger = RunLogger()
 
 
 def perturb_mask(patch_masks: torch.Tensor, args: SolvSamConfig, cur_epoch: float, num_iter: int) -> Tuple[torch.Tensor, float]:
@@ -52,12 +50,7 @@ def perturb_mask(patch_masks: torch.Tensor, args: SolvSamConfig, cur_epoch: floa
         raise ValueError(f"Invalid schedule type: {args.schedule_type}")
     drop_prob = np.clip(drop_prob, 0, 1)
 
-    if wandb_available:
-        wandb.define_metric("step")
-        wandb.define_metric("batch/drop_prob", step_metric="step")
-        wandb.log({"batch/drop_prob": drop_prob, "step": num_iter})
-    else:
-        mlflow.log_metric("batch/drop_prob", drop_prob, num_iter)
+    run_logger.log_metric("batch/drop_prob", drop_prob, num_iter)
 
     new_patch_masks = patch_masks.clone()
     bs, num_slots, N = new_patch_masks.shape
@@ -105,17 +98,22 @@ def train_epoch(args, encoder, model, optimizer, scheduler, train_dataloader, nu
             continue
 
         frames = frames.cuda(non_blocking=True)                                                 # (bs, 3, h, w)
-        masks = masks.cuda(non_blocking=True)                                                   # (bs, num_slots, h, w)
 
-        # (bs, num_slots, h, w) -> (bs, num_slots, num_tokens, path_size ** 2)
-        patch_masks = rearrange(masks, "b s (h p1) (w p2) -> b s (h w) (p1 p2)", p1=patch_size, p2=patch_size)
-        patch_masks = patch_masks.any(dim=-1)                                                   # (bs, num_slots, num_tokens)
-
-        if args.no_drop_ratio < 1:
-            input_patch_masks, drop_prob = perturb_mask(patch_masks, args, cur_epoch=num_iter / num_epoch_iter, num_iter=num_iter)
-        else:
-            input_patch_masks = patch_masks
+        if not args.load_sam_masks:
+            masks = input_patch_masks = None
             drop_prob = 0.0
+        else:
+            masks = masks.cuda(non_blocking=True)                                               # (bs, num_slots, h, w)
+
+            # (bs, num_slots, h, w) -> (bs, num_slots, num_tokens, path_size ** 2)
+            patch_masks = rearrange(masks, "b s (h p1) (w p2) -> b s (h w) (p1 p2)", p1=patch_size, p2=patch_size)
+            patch_masks = patch_masks.any(dim=-1)                                               # (bs, num_slots, num_tokens)
+
+            if args.no_drop_ratio < 1:
+                input_patch_masks, drop_prob = perturb_mask(patch_masks, args, cur_epoch=num_iter / num_epoch_iter, num_iter=num_iter)
+            else:
+                input_patch_masks = patch_masks
+                drop_prob = 0.0
 
         with torch.amp.autocast('cuda'):
             enc_features = encoder(frames)
@@ -151,12 +149,7 @@ def train_epoch(args, encoder, model, optimizer, scheduler, train_dataloader, nu
             loader.set_description(f"lr: {lr:.6f} | loss: {mean_loss:.5f}")
 
             for loss_term_name, loss_term_value in loss_terms.items():
-                if wandb_available:
-                    wandb.define_metric("step")
-                    wandb.define_metric(f"batch/{loss_term_name}", step_metric="step")
-                    wandb.log({f"batch/{loss_term_name}": loss_term_value.item(), "step": num_iter})
-                else:
-                    mlflow.log_metric(f"batch/{loss_term_name}", loss_term_value.item(), num_iter)
+                run_logger.log_metric(f"batch/{loss_term_name}", loss_term_value.item(), num_iter)
 
             if num_iter % args.train_visualize_freq == 0:
                 num_digits = len(str(total_iter))
@@ -165,7 +158,7 @@ def train_epoch(args, encoder, model, optimizer, scheduler, train_dataloader, nu
                     fname,
                     frames,
                     masks,
-                    input_patch_masks.float(),
+                    None if input_patch_masks is None else input_patch_masks.float(),
                     reconstruction,
                     patch_size,
                     train_dataloader.dataset.denormalize,
@@ -220,13 +213,18 @@ def val_epoch(args, encoder, model, val_dataloader, evaluator, epoch, use_mask=T
     for idx, (frames, gt_masks) in enumerate(val_loader):
 
         frames = frames[0].cuda(non_blocking=True)                                      # (T, 3, h, w)
-        gt_masks = gt_masks[0].cuda(non_blocking=True)                                  # (T, num_slots, h, w)
 
-        T, num_slots, _, _ = gt_masks.shape
+        if not args.load_sam_masks:
+            gt_masks = patch_masks = None
+            T = frames.shape[0]
+        else:
+            gt_masks = gt_masks[0].cuda(non_blocking=True)                              # (T, num_slots, h, w)
 
-        # (T, num_slots, h, w) -> (T, num_slots, num_tokens, path_size ** 2)
-        patch_masks = rearrange(gt_masks, "b s (h p1) (w p2) -> b s (h w) (p1 p2)", p1=patch_size, p2=patch_size)
-        patch_masks = patch_masks.any(dim=-1)                                           # (T, num_slots, num_tokens)
+            T, num_slots, _, _ = gt_masks.shape
+
+            # (T, num_slots, h, w) -> (T, num_slots, num_tokens, path_size ** 2)
+            patch_masks = rearrange(gt_masks, "b s (h p1) (w p2) -> b s (h w) (p1 p2)", p1=patch_size, p2=patch_size)
+            patch_masks = patch_masks.any(dim=-1)                                       # (T, num_slots, num_tokens)
 
         # === encoder feature extraction ===
         output_features = []
@@ -258,10 +256,10 @@ def val_epoch(args, encoder, model, val_dataloader, evaluator, epoch, use_mask=T
 
         loss_terms = compute_loss(frames, gt_masks, output_features, reconstruction, patch_size)
 
-        if args.rank == 0:
-            losses.append(
-                {k: v.item() for k, v in loss_terms.items()}
-            )
+        # tracked on every rank so that checkpoint selection has a score even without masks
+        losses.append(
+            {k: v.item() for k, v in loss_terms.items()}
+        )
 
         # visualize
         if idx in viz_idxes:
@@ -276,8 +274,8 @@ def val_epoch(args, encoder, model, val_dataloader, evaluator, epoch, use_mask=T
             log_mask_visualization(
                 f"{mlflow_prefix}/epoch_{epoch:02d}_ep_{idx}.png",
                 frames[frame_idxes],
-                gt_masks[frame_idxes],
-                patch_masks[frame_idxes].float(),
+                None if gt_masks is None else gt_masks[frame_idxes],
+                None if patch_masks is None else patch_masks[frame_idxes].float(),
                 {
                     k: None if v is None else v[frame_idxes]
                     for k, v in reconstruction.items()
@@ -286,6 +284,12 @@ def val_epoch(args, encoder, model, val_dataloader, evaluator, epoch, use_mask=T
                 val_dataloader.dataset.denormalize,
                 epoch=epoch,
             )
+
+        # === Instance Segmentation Evaluation ===
+        if not args.load_sam_masks:
+            # no ground truth to score against; the reconstruction losses are the only signal
+            val_loader.set_description(f"enc_feat_loss: {losses[-1]['enc_feat_loss']:.5f}")
+            continue
 
         if "segmentation" not in reconstruction:
             segmentation = repeat(reconstruction["patch_mask"], "t s n -> t s n p", p=patch_size * patch_size)
@@ -304,7 +308,6 @@ def val_epoch(args, encoder, model, val_dataloader, evaluator, epoch, use_mask=T
         predictions = torch.argmax(predictions, dim=1)                                  # (T, h, w)
         gt_masks = torch.argmax(gt_masks.float(), dim=1)                                # (T, h, w)
 
-        # === Instance Segmentation Evaluation ===
         miou = evaluator.update(predictions, gt_masks) if num_slots > 1 else 1.0
         loss_desc = f"mIoU: {miou * 100:.3f}"
 
@@ -315,14 +318,21 @@ def val_epoch(args, encoder, model, val_dataloader, evaluator, epoch, use_mask=T
     if args.rank == 0:
         for loss_term_name, loss_term_value in losses[0].items():
             loss_term_value = np.mean([loss[loss_term_name] for loss in losses])
-            if wandb_available:
-                wandb.define_metric("epoch")
-                wandb.define_metric(f"{mlflow_prefix}/{loss_term_name}", step_metric="epoch")
-                wandb.log({f"{mlflow_prefix}/{loss_term_name}": loss_term_value, "epoch": epoch})
-            else:
-                mlflow.log_metric(f"{mlflow_prefix}/{loss_term_name}", loss_term_value, epoch)
+            run_logger.log_metric(
+                f"{mlflow_prefix}/{loss_term_name}", loss_term_value, epoch, step_kind="epoch"
+            )
 
     # === Evaluation Results ====
+    if not args.load_sam_masks:
+        # rank checkpoints by the reconstruction objective instead of mIoU
+        val_loss = np.mean([loss["enc_feat_loss"] + loss["rgb_rec_loss"] for loss in losses])
+
+        print("\n=== Results ===")
+        print(f"\tval reconstruction loss: {val_loss:.5f} (segmentation metrics need SAM masks)\n")
+
+        dist.barrier()
+        return -val_loss, None
+
     miou, fg_ari = evaluator.get_results() if num_slots > 1 else (1.0, 1.0)
 
     # === Logger ===
@@ -331,14 +341,8 @@ def val_epoch(args, encoder, model, val_dataloader, evaluator, epoch, use_mask=T
     print(f"\tFG-ARI: {fg_ari * 100:.3f}\n")
 
     if args.rank == 0:
-        if wandb_available:
-            wandb.define_metric("epoch")
-            wandb.define_metric(f"{mlflow_prefix}/mIoU", step_metric="epoch")
-            wandb.define_metric(f"{mlflow_prefix}/FG-ARI", step_metric="epoch")
-            wandb.log({f"{mlflow_prefix}/mIoU": miou, f"{mlflow_prefix}/FG-ARI": fg_ari, "epoch": epoch})
-        else:
-            mlflow.log_metric(f"{mlflow_prefix}/mIoU", miou, epoch)
-            mlflow.log_metric(f"{mlflow_prefix}/FG-ARI", fg_ari, epoch)
+        run_logger.log_metric(f"{mlflow_prefix}/mIoU", miou, epoch, step_kind="epoch")
+        run_logger.log_metric(f"{mlflow_prefix}/FG-ARI", fg_ari, epoch, step_kind="epoch")
 
     dist.barrier()
 
@@ -362,20 +366,29 @@ def compute_loss(frames, gt_segmentations, enc_features, reconstruction, patch_s
     enc_feat_rel_error = enc_feat_abs_error / enc_features.std(dim=0).mean()
 
     # === rgb loss ===
-    masks_flat = rearrange(gt_segmentations, "b s h w -> (b h w) s")                        # (bs * h * w, num_slots)
-    pixel_valid = masks_flat.any(dim=1)                                                     # (bs * h * w)
-
     rgb_rec = reconstruction["rgb_rec"]                                                     # (bs, C, h, w)
     rgb_rec_flat = rearrange(rgb_rec, "b c h w -> (b h w) c")                               # (bs * h * w, C)
     frames_flat = rearrange(frames, "b c h w -> (b h w) c")                                 # (bs * h * w, C)
 
-    rgb_rec_loss = F.mse_loss(rgb_rec_flat[pixel_valid], frames_flat[pixel_valid])
+    if gt_segmentations is None:
+        # nothing marks a pixel as belonging to no object, so reconstruct all of them
+        masks_flat = pixel_valid = None
+        rgb_rec_loss = F.mse_loss(rgb_rec_flat, frames_flat)
+    else:
+        masks_flat = rearrange(gt_segmentations, "b s h w -> (b h w) s")                    # (bs * h * w, num_slots)
+        pixel_valid = masks_flat.any(dim=1)                                                 # (bs * h * w)
+        rgb_rec_loss = F.mse_loss(rgb_rec_flat[pixel_valid], frames_flat[pixel_valid])
 
     # === attn loss ===
-    patch_masks = rearrange(gt_segmentations, "b s (h p1) (w p2) -> b s (h w) (p1 p2)", p1=patch_size, p2=patch_size)
-    patch_masks = patch_masks.any(dim=-1)                                                   # (bs, num_slots, num_tokens)
-    attn = reconstruction["unweighted_attn"]
-    attn_loss = (attn[~patch_masks]).abs().mean()
+    if gt_segmentations is None:
+        # attention outside the ground truth is undefined without it; selecting on an
+        # all-true mask would average an empty tensor into a NaN that survives any weight
+        attn_loss = torch.zeros((), device=frames.device, dtype=rgb_rec_loss.dtype)
+    else:
+        patch_masks = rearrange(gt_segmentations, "b s (h p1) (w p2) -> b s (h w) (p1 p2)", p1=patch_size, p2=patch_size)
+        patch_masks = patch_masks.any(dim=-1)                                               # (bs, num_slots, num_tokens)
+        attn = reconstruction["unweighted_attn"]
+        attn_loss = (attn[~patch_masks]).abs().mean()
 
     loss = {
         "enc_feat_loss": enc_feat_loss,
@@ -386,7 +399,7 @@ def compute_loss(frames, gt_segmentations, enc_features, reconstruction, patch_s
     }
 
     # === segmentation Loss ===
-    if "segmentation_logits" in reconstruction:
+    if "segmentation_logits" in reconstruction and gt_segmentations is not None:
         segmentation_logits = reconstruction["segmentation_logits"]                         # (bs, num_slots, num_tokens, path_size ** 2)
         segmentation_logits = rearrange(
             segmentation_logits, "b s (h_p w_p) (p1 p2) -> b s (h_p p1) (w_p p2)",
@@ -440,29 +453,18 @@ def log_mask_visualization(
     for img, mask in zip(images, masks):
         viz.append(utils.visualize_mask(img, mask))  # [3, h, w]
 
+    image = torch.cat(viz, dim=1).permute(1, 2, 0).cpu().numpy()
+
     try:
-        if wandb_available:
-            fname = fname.split("/")[0]
-            if iteration is not None:
-                wandb.define_metric("step")
-                wandb.define_metric(f"viz/{fname}", step_metric="step")
-                wandb.log({f"viz/{fname}": wandb.Image(torch.cat(viz, dim=1).permute(1, 2, 0).cpu().numpy()), "step": iteration})
-            elif epoch is not None:
-                wandb.define_metric("epoch")
-                wandb.define_metric(f"viz/{fname}", step_metric="epoch")
-                wandb.log({f"viz/{fname}": wandb.Image(torch.cat(viz, dim=1).permute(1, 2, 0).cpu().numpy()), "epoch": epoch})
-        else:
-            mlflow.log_image(
-                torch.cat(viz, dim=1).permute(1, 2, 0).cpu().numpy(),
-                artifact_file=fname,
-            )
-    except:
-        print(f"Failed to log image {fname} to mlflow")
+        if iteration is not None:
+            run_logger.log_image(fname, image, iteration)
+        elif epoch is not None:
+            run_logger.log_image(fname, image, epoch, step_kind="epoch")
+    except Exception as error:
+        print(f"Failed to log image {fname}: {error}")
 
 
 def main_worker(args):
-    if args.rank == 0 and not wandb_available:
-        mlflow.log_params(dataclasses.asdict(args))
     # === Dataloaders ====
     train_dataloader, val_dataloader = utils.get_dataloaders(args)
 
@@ -498,7 +500,8 @@ def main_worker(args):
 
     print("Starting SOLV_SAM training!")
 
-    best_miou = -1
+    # mIoU when SAM masks are available, negative validation loss otherwise
+    best_score = -float("inf")
     start_epoch = num_iter // len(train_dataloader) + 1
     print(f"Starting SOLV_SAM training from epoch {start_epoch} iter {num_iter}!")
     total_iter = len(train_dataloader) * args.num_epochs
@@ -510,12 +513,7 @@ def main_worker(args):
         mean_loss, num_iter = train_epoch(args, encoder, model, optimizer, scheduler, train_dataloader, num_iter, total_iter)
 
         if args.rank == 0:
-            if wandb_available:
-                wandb.define_metric("epoch")
-                wandb.define_metric("epoch/train-loss", step_metric="epoch")
-                wandb.log({"epoch/train-loss": mean_loss, "epoch": epoch})
-            else:
-                mlflow.log_metric("epoch/train-loss", mean_loss, epoch)
+            run_logger.log_metric("epoch/train-loss", mean_loss, epoch, step_kind="epoch")
 
         # === Save Checkpoint ===
         save_dict = {
@@ -530,14 +528,14 @@ def main_worker(args):
         # === Validate ===
         if (epoch == 1) or (epoch % args.validation_epoch == 0):
             if args.encode_use_mask:
-                miou, _ = val_epoch(args, encoder, model, val_dataloader, evaluator, epoch, use_mask=True)
+                score, _ = val_epoch(args, encoder, model, val_dataloader, evaluator, epoch, use_mask=True)
                 if args.no_drop_ratio < 1:
                     _, _ = val_epoch(args, encoder, model, val_dataloader, evaluator, epoch, use_mask=False)
             else:
-                miou, _ = val_epoch(args, encoder, model, val_dataloader, evaluator, epoch, use_mask=False)
+                score, _ = val_epoch(args, encoder, model, val_dataloader, evaluator, epoch, use_mask=False)
 
-            if miou > best_miou:
-                best_miou = miou
+            if score > best_score:
+                best_score = score
                 utils.save_on_master(args, save_dict, f"best_checkpoint.pt")
 
         print("===== ===== ===== ===== =====")
@@ -554,25 +552,28 @@ if __name__ == "__main__":
     utils.fix_random_seeds(args.seed)
     cudnn.benchmark = True
 
-    if wandb_available:
-        args_dict = dataclasses.asdict(args)
+    backend = resolve_backend(args.logger)
+    repo_path = Path(__file__).resolve().parents[2]
 
+    if backend == "wandb":
         run_name = f"{args.run_name}_{time.strftime('%Y%m%d_%H%M%S')}"
-        repo_path = Path(__file__).resolve().parents[2]
-        wandb.init(
-            project=args.exp_name,
-            name=run_name,
-            config=args_dict,
-            dir=repo_path / "wandb",
-            mode="online" if (args.rank == 0 and args.exp_name != "test") else "disabled",
-        )
+        # wandb quiets the non-zero ranks itself, through its disabled mode
+        run_logger = WandbLogger(args, run_name, repo_path)
         args.ckpt_path = repo_path / "results" / args.exp_name / run_name
         main_worker(args)
+        run_logger.finish()
+    elif backend == "comet":
+        run_name = f"{args.run_name}_{time.strftime('%Y%m%d_%H%M%S')}"
+        # only rank 0 gets an experiment; the others keep the no-op logger
+        if args.rank == 0:
+            run_logger = CometLogger(args, run_name)
+        args.ckpt_path = repo_path / "results" / args.exp_name / run_name
+        main_worker(args)
+        run_logger.finish()
     else:
         if os.environ.get("AMLT_JOB_NAME", None) is None:
             if args.rank == 0:
                 # Set Up MLflow Logging to Local File
-                repo_path = Path(__file__).resolve().parents[2]
                 args.logging_path = repo_path / "mlruns"                            # oc_ssm/mlruns
                 mlflow.set_tracking_uri(args.logging_path)
 
@@ -581,6 +582,7 @@ if __name__ == "__main__":
                 with mlflow.start_run(run_name=run_name) as run:
                     mlflow_run_path = args.logging_path / experiment.experiment_id / run.info.run_id
                     args.ckpt_path = mlflow_run_path / "artifacts"
+                    run_logger = MlflowLogger(args)
                     main_worker(args)
 
                     # create a human-readable symlink for the run
@@ -596,4 +598,5 @@ if __name__ == "__main__":
             args.ckpt_path = Path("/mnt/default/oc_ssm/encoder") / args.exp_name / run_name
             mlflow.enable_system_metrics_logging()                  # Enable system metrics logging on Azure
             mlflow.set_system_metrics_samples_before_logging(12)    # Log every 12*10=120 seconds
+            run_logger = MlflowLogger(args)
             main_worker(args)

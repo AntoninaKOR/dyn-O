@@ -8,6 +8,11 @@ import torchvision.transforms as T
 from torch.utils import data
 
 
+# Returned in place of masks when training without SAM supervision. The dataloader needs a
+# tensor to collate, and the training loop skips it based on args.load_sam_masks.
+NO_MASK = torch.zeros(0, dtype=torch.bool)
+
+
 # === Dataset Classes ===
 class ProcgenMinariTrain(data.Dataset):
     def __init__(self, args):
@@ -15,6 +20,7 @@ class ProcgenMinariTrain(data.Dataset):
         self.dataset_ids = args.train_dataset_ids
         self.resize_to = args.resize_to
         self.num_slots = args.num_slots
+        self.load_sam_masks = args.load_sam_masks
 
         self.minari_datasets = [
             minari.load_dataset(ids)
@@ -25,7 +31,7 @@ class ProcgenMinariTrain(data.Dataset):
             for dataset in self.minari_datasets
         ]
         self.sam_mask_paths = [
-            dataset.storage._file_path.parent / "sam_masks.h5"
+            dataset.storage._file_path.parent / "sam_masks.h5" if self.load_sam_masks else None
             for dataset in self.minari_datasets
         ]
         # === Get Video Names and Lengths ===
@@ -42,6 +48,9 @@ class ProcgenMinariTrain(data.Dataset):
                     self.episode_paths.append((dataset_path, sam_mask_path, ep_idx))
                     self.video_lengths.append(ep_group.attrs.get("total_steps"))
 
+                if not self.load_sam_masks:
+                    continue
+
                 with h5py.File(sam_mask_path, "r") as file:
                     ep_group = file[f"episode_{ep_idx}"]
                     assert isinstance(ep_group, h5py.Group)
@@ -49,9 +58,13 @@ class ProcgenMinariTrain(data.Dataset):
                         ep_group.attrs["max_num_objs_in_single_frame"],
                         max_num_objs_in_single_frame,
                     )
-        print("Train dataset max_num_objs_in_single_frame", max_num_objs_in_single_frame)
-        if self.num_slots < max_num_objs_in_single_frame:
-            print(f"num_slots {self.num_slots} is less than max_num_objs_in_single_frame {max_num_objs_in_single_frame}. Will discard some objects.")
+
+        if not self.load_sam_masks:
+            print(f"Train dataset without SAM masks, num_slots {self.num_slots} is a free hyperparameter")
+        else:
+            print("Train dataset max_num_objs_in_single_frame", max_num_objs_in_single_frame)
+            if self.num_slots < max_num_objs_in_single_frame:
+                print(f"num_slots {self.num_slots} is less than max_num_objs_in_single_frame {max_num_objs_in_single_frame}. Will discard some objects.")
 
         self.mapping = self.create_idx_frame_mapping()
 
@@ -102,6 +115,10 @@ class ProcgenMinariTrain(data.Dataset):
             else:
                 frame = ep_group["observations"][frame_idx]             # (H, W, 3)
 
+        if not self.load_sam_masks:
+            frame = self.normalize(self.resize(self.to_tensor(frame)))
+            return frame, NO_MASK
+
         with h5py.File(sam_mask_path, "r") as file:
             ep_group = file[f"episode_{ep_idx}"]
             assert isinstance(ep_group, h5py.Group)
@@ -149,6 +166,7 @@ class ProcgenMinariVal(data.Dataset):
         self.dataset_ids = args.valid_dataset_ids
         self.resize_to = args.resize_to
         self.num_slots = args.num_slots
+        self.load_sam_masks = args.load_sam_masks
 
         self.minari_datasets = [
             minari.load_dataset(ids)
@@ -159,7 +177,7 @@ class ProcgenMinariVal(data.Dataset):
             for dataset in self.minari_datasets
         ]
         self.sam_mask_paths = [
-            dataset.storage._file_path.parent / "sam_masks.h5"
+            dataset.storage._file_path.parent / "sam_masks.h5" if self.load_sam_masks else None
             for dataset in self.minari_datasets
         ]
         # === Get Video Names and Lengths ===
@@ -174,6 +192,9 @@ class ProcgenMinariVal(data.Dataset):
                     assert isinstance(ep_group, h5py.Group)
                     self.episode_paths.append((dataset_path, sam_mask_path, ep_idx))
 
+                if not self.load_sam_masks:
+                    continue
+
                 with h5py.File(sam_mask_path, "r") as file:
                     ep_group = file[f"episode_{ep_idx}"]
                     assert isinstance(ep_group, h5py.Group)
@@ -181,9 +202,13 @@ class ProcgenMinariVal(data.Dataset):
                         ep_group.attrs["max_num_objs_in_single_frame"],
                         max_num_objs_in_single_frame,
                     )
-        print("Val dataset max_num_objs_in_single_frame", max_num_objs_in_single_frame)
-        if self.num_slots < max_num_objs_in_single_frame:
-            print(f"num_slots {self.num_slots} is less than max_num_objs_in_single_frame {max_num_objs_in_single_frame}. Will discard some objects.")
+
+        if not self.load_sam_masks:
+            print("Val dataset without SAM masks, segmentation metrics are disabled")
+        else:
+            print("Val dataset max_num_objs_in_single_frame", max_num_objs_in_single_frame)
+            if self.num_slots < max_num_objs_in_single_frame:
+                print(f"num_slots {self.num_slots} is less than max_num_objs_in_single_frame {max_num_objs_in_single_frame}. Will discard some objects.")
 
         # === Transformations ===
         self.resize = T.Resize(self.resize_to)
@@ -221,6 +246,10 @@ class ProcgenMinariVal(data.Dataset):
             frame = ep_group["observations"][:150]                  # (T, H, W, 3)
             if ep_group.attrs["total_steps"] == 1:
                 frame = frame[None]                                 # (1, H, W, 3)
+
+        if not self.load_sam_masks:
+            frame = torch.from_numpy(frame).permute(0, 3, 1, 2) / 255.0
+            return self.normalize(self.resize(frame)), NO_MASK
 
         with h5py.File(sam_mask_path, "r") as file:
             ep_group = file[f"episode_{ep_idx}"]

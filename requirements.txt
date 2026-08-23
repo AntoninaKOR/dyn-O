@@ -24,6 +24,7 @@ torchvision --index-url https://download.pytorch.org/whl/cu121
 tyro
 mlflow
 azureml-mlflow
+comet_ml                # only needed for --logger comet
 tensorboard
 transformers
 xformers --index-url https://download.pytorch.org/whl/cu121
