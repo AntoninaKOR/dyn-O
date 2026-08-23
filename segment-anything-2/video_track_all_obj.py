@@ -51,6 +51,12 @@ class SamConfig:
     new_obj_mask_overlap_thresh: float = 0.95
     use_mask_merge: bool = False
 
+    # Pixels within background_tolerance of this color are excluded from every object mask
+    # and stored as object 0. Procgen renders its background as pure black; set to None for
+    # environments without a constant-color background.
+    background_color: tuple[int, int, int] | None = (0, 0, 0)
+    background_tolerance: int = 0
+
 
 @dataclass
 class Config:
@@ -150,6 +156,15 @@ class Config:
         new_obj_mask_overlap_thresh=0.95,
         use_mask_merge=True,
     ))
+    # Starting point for 96x96 langroom frames: small objects on a textured floor, so masks
+    # are merged and the area threshold is low. Tune against `--visualize` output.
+    langroom_cfg: SamConfig = field(default_factory=lambda: SamConfig(
+        min_mask_region_area=5,
+        new_obj_detection_interval=5,
+        use_mask_merge=True,
+        background_color=(0, 0, 0),
+        background_tolerance=0,
+    ))
     rt1_cfg: SamConfig = field(default_factory=lambda: SamConfig(
         pred_iou_thresh=0.8,
         stability_score_thresh=0.7,
@@ -180,8 +195,18 @@ class Config:
         self.dataset_id = self.data_path.stem
 
         # assume dataset_id is in the format of f"procgen-{env_id}-v{data_version}"
-        self.env_name = env_name = self.dataset_id.split("-")[1]
-        self.sam_cfg = getattr(self, f"{env_name}_cfg")
+        tokens = self.dataset_id.split("-")
+        assert len(tokens) >= 2, \
+            f"dataset directory must be named '<prefix>-<env_name>-v<version>', got '{self.dataset_id}'"
+        self.env_name = env_name = tokens[1]
+
+        self.sam_cfg = getattr(self, f"{env_name}_cfg", None)
+        if self.sam_cfg is None:
+            self.sam_cfg = SamConfig()
+            print(
+                f"No SamConfig named '{env_name}_cfg', falling back to defaults. "
+                f"Add a '{env_name}_cfg' field to Config to tune SAM for this environment."
+            )
 
 
 def sample_point_prompt_from_segmentation(segmentation):
@@ -214,6 +239,19 @@ def sample_point_prompt_from_segmentation(segmentation):
         points[i + 1] = np.array([x_indices[idx], y_indices[idx]], dtype=np.float32)
 
     return points, labels
+
+
+def get_background_mask(frame, background_color=(0, 0, 0), background_tolerance=0):
+    """
+    frame: (H, W, 3) uint8 tensor
+    return: (H, W) bool tensor, True where the pixel is background
+    """
+    if background_color is None:
+        return torch.zeros(frame.shape[:2], dtype=torch.bool, device=frame.device)
+
+    color = torch.tensor(background_color, dtype=torch.int16, device=frame.device)
+    distance = (frame.to(torch.int16) - color).abs().amax(dim=-1)
+    return distance <= background_tolerance
 
 
 def compute_iou_batch(masks1, masks2):
@@ -277,6 +315,8 @@ def postprocess_auto_masks(
     new_obj_mask_iou_thresh=0.3,
     new_obj_mask_overlap_thresh=0.95,
     use_mask_merge=False,
+    background_color=(0, 0, 0),
+    background_tolerance=0,
 ):
     """
     auto_masks: dict{segmentation, segmentation_tensor, area, predicted_iou, stability_score, bbox}
@@ -287,7 +327,7 @@ def postprocess_auto_masks(
         "video_masks and video_masks_tensor should be both None or not None"
     # remove overlap with the background and remove the mask if it has high overlap with the background
     if frame is not None:
-        is_background = (frame == 0).all(dim=-1)
+        is_background = get_background_mask(frame, background_color, background_tolerance)
         filtered_masks = []
         for mask_result in auto_masks:
             mask = mask_result["segmentation_tensor"]
@@ -371,8 +411,10 @@ def postprocess_video_masks(
     obj_ids,
     video_masks_tensor,
     frame,
+    background_color=(0, 0, 0),
+    background_tolerance=0,
 ):
-    background = (frame == 0).all(dim=-1)
+    background = get_background_mask(frame, background_color, background_tolerance)
     video_masks_tensor = video_masks_tensor & ~background
     video_masks_valid = video_masks_tensor.sum(dim=(-2, -1)) > 0
     obj_ids = [obj_id for obj_id, valid in zip(obj_ids, video_masks_valid) if valid]
@@ -426,6 +468,8 @@ def compute_episode_video_masks(
         new_obj_mask_iou_thresh=sam_cfg.new_obj_mask_iou_thresh,
         new_obj_mask_overlap_thresh=sam_cfg.new_obj_mask_overlap_thresh,
         use_mask_merge=sam_cfg.use_mask_merge,
+        background_color=sam_cfg.background_color,
+        background_tolerance=sam_cfg.background_tolerance,
     )
     assert len(auto_masks) > 0, "The first frame should have at least one mask"
 
@@ -489,6 +533,8 @@ def compute_episode_video_masks(
             deepcopy(obj_ids),
             raw_video_masks_tensor,
             original_frames[out_frame_idx],
+            background_color=sam_cfg.background_color,
+            background_tolerance=sam_cfg.background_tolerance,
         )
     video_masks_frame_idx = out_frame_idx
 
@@ -565,6 +611,8 @@ def compute_episode_video_masks(
                 new_obj_mask_iou_thresh=sam_cfg.new_obj_mask_iou_thresh,
                 new_obj_mask_overlap_thresh=sam_cfg.new_obj_mask_overlap_thresh,
                 use_mask_merge=sam_cfg.use_mask_merge,
+                background_color=sam_cfg.background_color,
+                background_tolerance=sam_cfg.background_tolerance,
             )
 
         has_new_objects = len(auto_masks) > 0
@@ -652,6 +700,8 @@ def compute_episode_video_masks(
                 deepcopy(obj_ids),
                 raw_video_masks_tensor,
                 original_frames[out_frame_idx],
+                background_color=sam_cfg.background_color,
+                background_tolerance=sam_cfg.background_tolerance,
             )
 
         video_masks_frame_idx = out_frame_idx

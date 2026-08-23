@@ -12,6 +12,7 @@ results
 scripts
 embeddings
 wandb/
+.scratch/
 
 # C extensions
 *.so
