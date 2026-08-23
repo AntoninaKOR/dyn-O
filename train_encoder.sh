@@ -28,7 +28,9 @@ ATTN_LOSS_WEIGHT=0.0
 NUM_SLOTS=10                                # homegrid shows at most 10 objects per frame
 ENCODER="Cosmos-0.1-Tokenizer-CI8x8"
 RESIZE_TO="96 96"                           # must be divisible by the encoder patch size
-BATCH_SIZE=256
+BATCH_SIZE=256                              # global; the dataloader splits it across GPUS
+
+GPUS=1
 
 NUM_EPOCHS=10
 SCHEDULE_START_EPOCH=1
@@ -41,7 +43,11 @@ else
   LOAD_SAM_MASKS_FLAG="--no_load_sam_masks"
 fi
 
-CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --master_port=12345 --nproc_per_node=4 encoder/solv_sam/train.py \
+# built by hand rather than with seq, whose separator handling differs between platforms
+GPU_IDS=0
+for ((i = 1; i < GPUS; i++)); do GPU_IDS="${GPU_IDS},${i}"; done
+
+CUDA_VISIBLE_DEVICES=${GPU_IDS} torchrun --master_port=12345 --nproc_per_node=${GPUS} encoder/solv_sam/train.py \
   --exp_name ${EXP_NAME} \
   --run_name ${RUN_NAME} \
   --logger ${LOGGER} \
