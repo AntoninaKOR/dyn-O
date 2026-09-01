@@ -25,10 +25,14 @@ NO_DROP_RATIO=0.1
 ATTN_LOSS_WEIGHT=0.0
 
 # encoder
-NUM_SLOTS=10                                # homegrid shows at most 10 objects per frame
-ENCODER="Cosmos-0.1-Tokenizer-CI8x8"
-RESIZE_TO="96 96"                           # must be divisible by the encoder patch size
-BATCH_SIZE=256                              # global; the dataloader splits it across GPUS
+# homegrid frames hold 5 entities on average and at most 10, floor and walls included;
+# without masks the decoder reconstructs those too, so they occupy slots as well
+NUM_SLOTS=10
+# paper setting: 224x224 over a patch of 16 gives 196 tokens. resize_to must be divisible
+# by the patch size, which config.py parses out of the encoder name
+ENCODER="Cosmos-0.1-Tokenizer-CI16x16"
+RESIZE_TO="224 224"
+BATCH_SIZE=64                               # global; the dataloader splits it across GPUS
 
 GPUS=1
 
