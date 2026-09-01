@@ -38,7 +38,10 @@ einx
 -e encoder/cosmos
 
 # ============================== Mamba ==============================
-mamba-ssm[causal-conv1d]
+# 2.3.2.post1 requires triton>=3.5.0, which torch 2.5.1 (pinned to triton 3.1.0) cannot
+# satisfy: pip resolves the conflict by pulling a much newer torch and breaking the env.
+# Build it separately, after torch, with --no-build-isolation.
+mamba-ssm[causal-conv1d]<2.3.2
 
 # ============================== Misc ==============================
 numba==0.60.0
