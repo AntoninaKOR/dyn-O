@@ -66,6 +66,10 @@ class Config:
     force_recompute: bool = False
     backup_freq: int = 5
 
+    # Cap the episodes handled in one run. Tuning a SamConfig means staring at --visualize
+    # output, and without this the smallest experiment is the whole dataset.
+    max_episodes: int | None = None
+
     # =============== Automatic Mask Generator ===============
     skiing_cfg: SamConfig = field(default_factory=lambda: SamConfig(
         min_mask_region_area=5,
@@ -164,6 +168,20 @@ class Config:
         use_mask_merge=True,
         background_color=(0, 0, 0),
         background_tolerance=0,
+    ))
+    # 96x96 homegrid frames: sprites span 15 to 32 px over a textured floor, and jpeg noise
+    # smears every flat colour across a dozen shades. Measured over 200 train frames, not a
+    # single pixel is near black, so the default black-background rule would mark nothing;
+    # there is no constant-colour background at all, the floor being tan around (196,177,160)
+    # and the walls grey. Leaving it unset tracks floor and walls as objects, which is also
+    # what the ground-truth masks shipped with the val split do. Tune against --visualize.
+    homegrid_cfg: SamConfig = field(default_factory=lambda: SamConfig(
+        pred_iou_thresh=0.7,
+        stability_score_thresh=0.7,
+        min_mask_region_area=15,
+        new_obj_detection_interval=5,
+        use_mask_merge=True,
+        background_color=None,
     ))
     rt1_cfg: SamConfig = field(default_factory=lambda: SamConfig(
         pred_iou_thresh=0.8,
@@ -880,6 +898,10 @@ def main(cfg: Config):
     print("Number of unfinished episodes:", len(unfinished_episodes))
     if len(unfinished_episodes) == 0:
         return
+
+    if cfg.max_episodes is not None:
+        unfinished_episodes = unfinished_episodes[: cfg.max_episodes]
+        print("Limited by max_episodes to:", len(unfinished_episodes))
 
     if cfg.sam_mask_file_name.exists():
         shutil.copy(cfg.sam_mask_file_name, cfg.tmp_mask_file_name)
