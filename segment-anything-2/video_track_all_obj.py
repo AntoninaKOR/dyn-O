@@ -175,12 +175,15 @@ class Config:
     # there is no constant-colour background at all, the floor being tan around (196,177,160)
     # and the walls grey. Leaving it unset tracks floor and walls as objects, which is also
     # what the ground-truth masks shipped with the val split do. Tune against --visualize.
+    # Merging is off precisely because there is no background to subtract: it unions every
+    # mask and keeps the connected components, and with sprites sitting flush on the floor
+    # that is a single component spanning the whole frame.
     homegrid_cfg: SamConfig = field(default_factory=lambda: SamConfig(
         pred_iou_thresh=0.7,
         stability_score_thresh=0.7,
         min_mask_region_area=15,
         new_obj_detection_interval=5,
-        use_mask_merge=True,
+        use_mask_merge=False,
         background_color=None,
     ))
     rt1_cfg: SamConfig = field(default_factory=lambda: SamConfig(
@@ -925,6 +928,14 @@ def main(cfg: Config):
     # remove the lock file and rename the tmp file to the final file
     if cfg.lock_file_name.exists():
         os.remove(cfg.lock_file_name)
+
+    # workers append to the tmp file, so its absence means none of them wrote an episode.
+    # Renaming it then raises on top of whatever actually killed them, hiding the cause.
+    if not cfg.tmp_mask_file_name.exists():
+        raise RuntimeError(
+            f"no episode was written to {cfg.tmp_mask_file_name}; see the worker traceback above"
+        )
+
     if cfg.sam_mask_file_name.exists():
         os.remove(cfg.sam_mask_file_name)
     os.rename(cfg.tmp_mask_file_name, cfg.sam_mask_file_name)
