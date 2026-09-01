@@ -432,8 +432,14 @@ def log_mask_visualization(
     frames = denormalize_fn(frames)
     rgb_rec = denormalize_fn(reconstruction["rgb_rec"]).clip(0, 1)
 
-    images = [frames, rgb_rec, frames, frames, frames]
-    masks = [None, None, gt_patch_segmentations, reconstruction["patch_mask"], gt_segmentations]
+    # a row whose mask is missing renders as the bare frames, so without ground truth three
+    # of the five rows used to be copies of the first one
+    rows = [(frames, None), (rgb_rec, None)]
+    if gt_patch_segmentations is not None:
+        rows.append((frames, gt_patch_segmentations))
+    rows.append((frames, reconstruction["patch_mask"]))
+    if gt_segmentations is not None:
+        rows.append((frames, gt_segmentations))
 
     if "segmentation" in reconstruction:
         segmentations = rearrange(
@@ -446,12 +452,9 @@ def log_mask_visualization(
         rgb_rec[~pixel_valid.expand_as(rgb_rec)] = 0
         segmentations[~pixel_valid.expand_as(segmentations)] = 0
 
-        images.append(frames)
-        masks.append(segmentations)
+        rows.append((frames, segmentations))
 
-    viz = []
-    for img, mask in zip(images, masks):
-        viz.append(utils.visualize_mask(img, mask))  # [3, h, w]
+    viz = [utils.visualize_mask(img, mask) for img, mask in rows]  # each [3, h, w]
 
     image = torch.cat(viz, dim=1).permute(1, 2, 0).cpu().numpy()
 
