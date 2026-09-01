@@ -557,17 +557,17 @@ if __name__ == "__main__":
 
     if backend == "wandb":
         run_name = f"{args.run_name}_{time.strftime('%Y%m%d_%H%M%S')}"
-        # wandb quiets the non-zero ranks itself, through its disabled mode
-        run_logger = WandbLogger(args, run_name, repo_path)
         args.ckpt_path = repo_path / "results" / args.exp_name / run_name
+        # wandb quiets the non-zero ranks itself, through its disabled mode
+        run_logger = WandbLogger(args, run_name, repo_path, args.ckpt_path / "viz")
         main_worker(args)
         run_logger.finish()
     elif backend == "comet":
         run_name = f"{args.run_name}_{time.strftime('%Y%m%d_%H%M%S')}"
+        args.ckpt_path = repo_path / "results" / args.exp_name / run_name
         # only rank 0 gets an experiment; the others keep the no-op logger
         if args.rank == 0:
-            run_logger = CometLogger(args, run_name)
-        args.ckpt_path = repo_path / "results" / args.exp_name / run_name
+            run_logger = CometLogger(args, run_name, args.ckpt_path / "viz")
         main_worker(args)
         run_logger.finish()
     else:

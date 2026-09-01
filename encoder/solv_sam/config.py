@@ -13,6 +13,11 @@ class SolvSamConfig:
     # when it is importable and falling back to mlflow otherwise.
     logger: Literal["auto", "wandb", "comet", "mlflow"] = "auto"
 
+    # Comet sends assets to a different endpoint than metrics, and clusters that firewall
+    # it make every visualisation stall for the full upload timeout. Visualisations are
+    # written under ckpt_path either way, so uploading them is optional.
+    upload_images: bool = True
+
     # === Data Related Parameters ===
     dataset: str = "procgen_minari"
     root: str = field(default="/scratch/cluster/zzwang_new/procgen_data")

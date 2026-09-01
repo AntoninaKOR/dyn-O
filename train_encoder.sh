@@ -4,6 +4,11 @@
 # comet reads COMET_API_KEY and COMET_WORKSPACE from the environment.
 LOGGER="comet"
 
+# visualisations always land in results/${EXP_NAME}/${RUN_NAME}_<timestamp>/viz. Uploads
+# are shrunk to a jpeg first, but set this to False where the asset endpoint is slow
+# enough that even that stalls.
+UPLOAD_IMAGES=True
+
 # EXP_NAME is the project, RUN_NAME the run within it; both loggers get a timestamp
 # appended to RUN_NAME so repeated runs do not collide
 EXP_NAME="dynO"
@@ -48,6 +53,12 @@ else
   LOAD_SAM_MASKS_FLAG="--no_load_sam_masks"
 fi
 
+if [ "${UPLOAD_IMAGES}" = "True" ]; then
+  UPLOAD_IMAGES_FLAG="--upload_images"
+else
+  UPLOAD_IMAGES_FLAG="--no_upload_images"
+fi
+
 GPUS=$(awk -F, '{print NF}' <<< "${GPU_IDS}")
 
 CUDA_VISIBLE_DEVICES=${GPU_IDS} torchrun --master_port=${MASTER_PORT:-12345} --nproc_per_node=${GPUS} encoder/solv_sam/train.py \
@@ -62,6 +73,7 @@ CUDA_VISIBLE_DEVICES=${GPU_IDS} torchrun --master_port=${MASTER_PORT:-12345} --n
   --train_dataset_ids ${DATASET_ID}-${ENVID}-v${TRAIN_VERSION} \
   --valid_dataset_ids ${DATASET_ID}-${ENVID}-v${VALID_VERSION} \
   ${LOAD_SAM_MASKS_FLAG} \
+  ${UPLOAD_IMAGES_FLAG} \
   --encode_use_mask ${ENCODE_USE_MASK} \
   --no_drop_ratio ${NO_DROP_RATIO} \
   --attn_loss_weight ${ATTN_LOSS_WEIGHT} \
