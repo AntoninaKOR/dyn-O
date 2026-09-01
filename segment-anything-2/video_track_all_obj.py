@@ -51,10 +51,13 @@ class SamConfig:
     new_obj_mask_overlap_thresh: float = 0.95
     use_mask_merge: bool = False
 
-    # Pixels within background_tolerance of this color are excluded from every object mask
-    # and stored as object 0. Procgen renders its background as pure black; set to None for
-    # environments without a constant-color background.
-    background_color: tuple[int, int, int] | None = (0, 0, 0)
+    # Pixels within background_tolerance of any of these colors are excluded from every
+    # object mask and stored as object 0. Procgen renders its background as pure black;
+    # several colors are needed where the background is made of a few flat surfaces, such
+    # as a floor plus an unobserved area. Set to None for environments with no flat
+    # background, but note that whatever is left unsubtracted is tracked as an object and
+    # then suppresses every new object that appears on top of it.
+    background_color: tuple[tuple[int, int, int], ...] | None = ((0, 0, 0),)
     background_tolerance: int = 0
 
 
@@ -166,25 +169,26 @@ class Config:
         min_mask_region_area=5,
         new_obj_detection_interval=5,
         use_mask_merge=True,
-        background_color=(0, 0, 0),
+        background_color=((0, 0, 0),),
         background_tolerance=0,
     ))
-    # 96x96 homegrid frames: sprites span 15 to 32 px over a textured floor, and jpeg noise
-    # smears every flat colour across a dozen shades. Measured over 200 train frames, not a
-    # single pixel is near black, so the default black-background rule would mark nothing;
-    # there is no constant-colour background at all, the floor being tan around (196,177,160)
-    # and the walls grey. Leaving it unset tracks floor and walls as objects, which is also
-    # what the ground-truth masks shipped with the val split do. Tune against --visualize.
-    # Merging is off precisely because there is no background to subtract: it unions every
-    # mask and keeps the connected components, and with sprites sitting flush on the floor
-    # that is a single component spanning the whole frame.
+    # 96x96 homegrid frames: sprites span 15 to 32 px and jpeg noise smears every flat
+    # colour over about a dozen shades, hence the wide tolerance. The background is both
+    # floor finishes, the pale tiles and the two tans, because objects rest on the floor:
+    # left as an object it covers them, and the new-object filter, which drops any mask
+    # contained in an already tracked one, then never sees them. Walls stay objects: they
+    # are painted the same grey as the cookers and the fridge, so subtracting them hollows
+    # out the appliances, and nothing ever appears on top of a wall anyway.
+    # Merging is off because it unions every mask and keeps the connected components, and
+    # with sprites sitting flush on the floor that is one component spanning the frame.
     homegrid_cfg: SamConfig = field(default_factory=lambda: SamConfig(
         pred_iou_thresh=0.7,
         stability_score_thresh=0.7,
         min_mask_region_area=15,
         new_obj_detection_interval=5,
         use_mask_merge=False,
-        background_color=None,
+        background_color=((227, 228, 222), (237, 237, 239), (233, 206, 176), (200, 184, 168)),
+        background_tolerance=16,
     ))
     rt1_cfg: SamConfig = field(default_factory=lambda: SamConfig(
         pred_iou_thresh=0.8,
@@ -262,17 +266,19 @@ def sample_point_prompt_from_segmentation(segmentation):
     return points, labels
 
 
-def get_background_mask(frame, background_color=(0, 0, 0), background_tolerance=0):
+def get_background_mask(frame, background_color=((0, 0, 0),), background_tolerance=0):
     """
     frame: (H, W, 3) uint8 tensor
+    background_color: sequence of RGB triples, a pixel is background when it is within
+        background_tolerance of any of them
     return: (H, W) bool tensor, True where the pixel is background
     """
     if background_color is None:
         return torch.zeros(frame.shape[:2], dtype=torch.bool, device=frame.device)
 
-    color = torch.tensor(background_color, dtype=torch.int16, device=frame.device)
-    distance = (frame.to(torch.int16) - color).abs().amax(dim=-1)
-    return distance <= background_tolerance
+    colors = torch.tensor(background_color, dtype=torch.int16, device=frame.device).reshape(-1, 3)
+    distance = (frame.to(torch.int16).unsqueeze(-2) - colors).abs().amax(dim=-1)
+    return (distance <= background_tolerance).any(dim=-1)
 
 
 def compute_iou_batch(masks1, masks2):
@@ -336,7 +342,7 @@ def postprocess_auto_masks(
     new_obj_mask_iou_thresh=0.3,
     new_obj_mask_overlap_thresh=0.95,
     use_mask_merge=False,
-    background_color=(0, 0, 0),
+    background_color=((0, 0, 0),),
     background_tolerance=0,
 ):
     """
@@ -432,7 +438,7 @@ def postprocess_video_masks(
     obj_ids,
     video_masks_tensor,
     frame,
-    background_color=(0, 0, 0),
+    background_color=((0, 0, 0),),
     background_tolerance=0,
 ):
     background = get_background_mask(frame, background_color, background_tolerance)
