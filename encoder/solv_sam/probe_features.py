@@ -54,7 +54,7 @@ def kmeans(features: torch.Tensor, num_clusters: int, iters: int = 50, seed: int
     return torch.cdist(features, centroids).argmin(dim=1)
 
 
-def encode(encoder_name: str, frames: np.ndarray, resize_to: int) -> torch.Tensor:
+def encode(encoder_name: str, frames: np.ndarray, resize_to: int, interpolation: str) -> torch.Tensor:
     """frames: (n, h, w, 3) uint8 -> (n, num_tokens, token_dim) on cpu."""
     args = SolvSamConfig(encoder=encoder_name, resize_to=[resize_to, resize_to])
 
@@ -66,8 +66,9 @@ def encode(encoder_name: str, frames: np.ndarray, resize_to: int) -> torch.Tenso
         encoder = DinoEncoder(args).cuda().eval()
         normalize = T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 
+    modes = {"bilinear": T.InterpolationMode.BILINEAR, "nearest": T.InterpolationMode.NEAREST_EXACT}
     images = torch.from_numpy(frames).permute(0, 3, 1, 2).float() / 255.0
-    images = T.Resize((resize_to, resize_to))(images)
+    images = T.Resize((resize_to, resize_to), interpolation=modes[interpolation])(images)
     images = normalize(images).cuda()
 
     with torch.no_grad():
@@ -96,6 +97,9 @@ def main():
     parser.add_argument("--num_episodes", type=int, default=3)
     parser.add_argument("--frames_per_episode", type=int, default=4)
     parser.add_argument("--resize_to", type=int, default=224)
+    # a 96 px frame is stretched more than twofold, and bilinear turns every sprite edge
+    # into a gradient; nearest keeps the flat colours pixel art is made of
+    parser.add_argument("--interpolation", choices=["bilinear", "nearest"], default="bilinear")
     parser.add_argument("--out", type=Path, default=Path("probe_features.png"))
     cfg = parser.parse_args()
 
@@ -108,7 +112,7 @@ def main():
     ], axis=1)]
 
     for encoder_name in cfg.encoders:
-        features = encode(encoder_name, frames, cfg.resize_to)
+        features = encode(encoder_name, frames, cfg.resize_to, cfg.interpolation)
         print(f"{encoder_name}: {tuple(features.shape)}")
 
         # clustered jointly over all frames, so a colour means the same thing everywhere and
