@@ -29,13 +29,23 @@ PALETTE = np.array([
 ], dtype=np.uint8)
 
 
-def load_frames(data_path: Path, num_episodes: int, frames_per_episode: int) -> np.ndarray:
-    frames = []
+def load_frames(
+    data_path: Path, num_episodes: int, frames_per_episode: int, seed: int
+) -> np.ndarray:
     with h5py.File(data_path / "data" / "main_data.hdf5", "r") as file:
-        for ep in list(file.keys())[:num_episodes]:
-            observations = file[ep]["observations"]
+        episodes = list(file.keys())
+        # drawn from the whole dataset rather than off the front, so a second opinion on the
+        # same question lands on different rooms and different objects
+        chosen = np.random.default_rng(seed).choice(
+            len(episodes), size=min(num_episodes, len(episodes)), replace=False
+        )
+        print(f"episodes: {', '.join(episodes[i] for i in sorted(chosen))}")
+
+        frames = []
+        for i in sorted(chosen):
+            observations = file[episodes[i]]["observations"]
             idxes = np.linspace(0, len(observations) - 1, frames_per_episode, dtype=int)
-            frames.extend(observations[i] for i in idxes)
+            frames.extend(observations[j] for j in idxes)
     return np.stack(frames)
 
 
@@ -123,10 +133,11 @@ def main():
     # into a gradient; nearest keeps the flat colours pixel art is made of
     parser.add_argument("--interpolation", choices=["bilinear", "nearest"], default="bilinear")
     parser.add_argument("--metric", choices=["l2", "cosine"], default="l2")
+    parser.add_argument("--seed", type=int, default=0, help="picks which episodes to look at")
     parser.add_argument("--out", type=Path, default=Path("probe_features.png"))
     cfg = parser.parse_args()
 
-    frames = load_frames(cfg.data_path, cfg.num_episodes, cfg.frames_per_episode)
+    frames = load_frames(cfg.data_path, cfg.num_episodes, cfg.frames_per_episode, cfg.seed)
     print(f"{len(frames)} frames of {frames.shape[1]}x{frames.shape[2]}")
 
     size = cfg.resize_to
