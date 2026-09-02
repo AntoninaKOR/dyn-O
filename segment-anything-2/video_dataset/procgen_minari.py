@@ -18,7 +18,13 @@ procgen_timeout = {
 
 
 class ProcgenMinari(Dataset):
-    def __init__(self, cfg, episode_idxes, resize_to: int):
+    def __init__(
+        self,
+        cfg,
+        episode_idxes,
+        resize_to: int,
+        interpolation=transforms.InterpolationMode.BILINEAR,
+    ):
         self.minari_dataset = MinariDataset(cfg.data_path / "data", episode_idxes)
         self.episode_idxes = episode_idxes
 
@@ -27,7 +33,7 @@ class ProcgenMinari(Dataset):
 
         mean, std = [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]
         self.transform = transforms.Compose([
-            transforms.Resize((resize_to, resize_to)),
+            transforms.Resize((resize_to, resize_to), interpolation=interpolation),
             transforms.Normalize(mean=mean, std=std)
         ])
 

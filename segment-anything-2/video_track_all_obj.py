@@ -8,13 +8,16 @@ import numpy as np
 from tqdm import tqdm
 from copy import deepcopy
 from pathlib import Path
+from typing import Literal
 from filelock import FileLock
 from dataclasses import dataclass, field
 from scipy.ndimage import distance_transform_edt, label, generate_binary_structure
 
 import torch
+import torch.nn as nn
 import torch.multiprocessing as mp
 from torch.utils.data import DataLoader
+from torchvision.transforms import InterpolationMode, Normalize, Resize
 
 # use bfloat16 for the entire script
 torch.autocast("cuda", dtype=torch.bfloat16).__enter__()
@@ -50,6 +53,12 @@ class SamConfig:
     new_obj_mask_iou_thresh: float = 0.3
     new_obj_mask_overlap_thresh: float = 0.95
     use_mask_merge: bool = False
+
+    # How frames are scaled up to the 1024 px SAM works at. Bilinear suits photographic
+    # input, but on pixel art a large upscale turns every sprite edge into a gradient tens
+    # of pixels wide and leaves SAM no boundary to lock onto; nearest keeps the flat colours
+    # and the hard edges intact.
+    resize_interpolation: Literal["bilinear", "nearest"] = "bilinear"
 
     # Pixels within background_tolerance of any of these colors are excluded from every
     # object mask and stored as object 0. Procgen renders its background as pure black;
@@ -187,6 +196,7 @@ class Config:
         min_mask_region_area=15,
         new_obj_detection_interval=5,
         use_mask_merge=False,
+        resize_interpolation="nearest",
         background_color=((227, 228, 222), (237, 237, 239), (233, 206, 176), (200, 184, 168)),
         # 24 clears the jpeg halo where sprite and floor colours blend; the nearest sprite
         # colour, the crate timber, sits 32 away, so this is as wide as the tolerance goes
@@ -266,6 +276,28 @@ def sample_point_prompt_from_segmentation(segmentation):
         points[i + 1] = np.array([x_indices[idx], y_indices[idx]], dtype=np.float32)
 
     return points, labels
+
+
+INTERPOLATION_MODES = {
+    "bilinear": InterpolationMode.BILINEAR,
+    "nearest": InterpolationMode.NEAREST_EXACT,
+}
+
+
+def set_resize_interpolation(sam2_transforms, interpolation):
+    """
+    Rebuild the resize of a SAM2Transforms, which the automatic mask generator applies to
+    the raw frame on its own rather than taking the one the dataset already did.
+    """
+    sam2_transforms.transforms = torch.jit.script(
+        nn.Sequential(
+            Resize(
+                (sam2_transforms.resolution, sam2_transforms.resolution),
+                interpolation=interpolation,
+            ),
+            Normalize(sam2_transforms.mean, sam2_transforms.std),
+        )
+    )
 
 
 def get_background_mask(frame, background_color=((0, 0, 0),), background_tolerance=0):
@@ -800,8 +832,16 @@ def worker(
             "Crop n layers is not supported in this script due to the overwriting of mask_generator.points_grid",
         )
 
+    interpolation = INTERPOLATION_MODES[sam_cfg.resize_interpolation]
+    set_resize_interpolation(mask_generator.predictor._transforms, interpolation)
+
     # load minari dataset
-    dataset = ProcgenMinari(cfg, episode_idxes=episode_idxes, resize_to=predictor.image_size)
+    dataset = ProcgenMinari(
+        cfg,
+        episode_idxes=episode_idxes,
+        resize_to=predictor.image_size,
+        interpolation=interpolation,
+    )
     data_loader = DataLoader(
         dataset, batch_size=1, num_workers=0, pin_memory=True, collate_fn=dataset.collate_fn
     )
