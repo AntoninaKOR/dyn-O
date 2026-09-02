@@ -39,8 +39,16 @@ def load_frames(data_path: Path, num_episodes: int, frames_per_episode: int) -> 
     return np.stack(frames)
 
 
-def kmeans(features: torch.Tensor, num_clusters: int, iters: int = 50, seed: int = 0) -> torch.Tensor:
+def kmeans(
+    features: torch.Tensor, num_clusters: int, metric: str = "l2", iters: int = 50, seed: int = 0
+) -> torch.Tensor:
     """features: (n, d) -> (n,) cluster ids, Lloyd's algorithm from a random subset."""
+    # normalising first makes euclidean order agree with cosine order, which is the usual
+    # metric for transformer features: DINOv2 carries artifact tokens of huge norm that
+    # would otherwise sit far from everything and claim a cluster of their own
+    if metric == "cosine":
+        features = torch.nn.functional.normalize(features, dim=-1)
+
     generator = torch.Generator(device="cpu").manual_seed(seed)
     centroids = features[torch.randperm(len(features), generator=generator)[:num_clusters]].clone()
 
@@ -114,6 +122,7 @@ def main():
     # a 96 px frame is stretched more than twofold, and bilinear turns every sprite edge
     # into a gradient; nearest keeps the flat colours pixel art is made of
     parser.add_argument("--interpolation", choices=["bilinear", "nearest"], default="bilinear")
+    parser.add_argument("--metric", choices=["l2", "cosine"], default="l2")
     parser.add_argument("--out", type=Path, default=Path("probe_features.png"))
     cfg = parser.parse_args()
 
@@ -140,7 +149,8 @@ def main():
 
             # clustered jointly over all frames, so a colour means the same thing everywhere
             # and an object holding its colour across frames says the features are stable
-            assignment = kmeans(flat, num_clusters).reshape(num_frames, num_tokens).numpy()
+            assignment = kmeans(flat, num_clusters, cfg.metric)
+            assignment = assignment.reshape(num_frames, num_tokens).numpy()
 
             short_name = encoder_name.split("-Tokenizer-")[-1].split("-vitb")[0]
             rows.append((f"{short_name} k={num_clusters}", np.concatenate([
