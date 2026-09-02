@@ -17,7 +17,7 @@ import h5py
 import numpy as np
 import torch
 import torchvision.transforms as T
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 from config import SolvSamConfig
 from models.model import CosmosEncoder, DinoEncoder
@@ -89,11 +89,25 @@ def cluster_overlay(frame: np.ndarray, assignment: np.ndarray, size: int) -> np.
     return (0.45 * frame + 0.55 * colors).astype(np.uint8)
 
 
+def label(text: str, height: int, width: int = 150) -> np.ndarray:
+    strip = Image.new("RGB", (width, height), (255, 255, 255))
+    draw = ImageDraw.Draw(strip)
+    try:
+        font = ImageFont.truetype("DejaVuSans.ttf", 18)
+    except OSError:
+        font = ImageFont.load_default()
+    draw.text((10, height // 2 - 10), text, fill=(0, 0, 0), font=font)
+    return np.array(strip)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_path", type=Path, required=True)
     parser.add_argument("--encoders", nargs="+", default=["Cosmos-0.1-Tokenizer-CI16x16", "dinov2-vitb-14"])
-    parser.add_argument("--num_clusters", type=int, default=10)
+    # several values get their own row each, off one pass of the encoder, since encoding is
+    # the slow part and the point of sweeping k is to tell a real cluster from one that
+    # k-means had to invent by carving up the floor
+    parser.add_argument("--num_clusters", type=int, nargs="+", default=[3, 5, 10])
     parser.add_argument("--num_episodes", type=int, default=3)
     parser.add_argument("--frames_per_episode", type=int, default=4)
     parser.add_argument("--resize_to", type=int, default=224)
@@ -107,27 +121,41 @@ def main():
     print(f"{len(frames)} frames of {frames.shape[1]}x{frames.shape[2]}")
 
     size = cfg.resize_to
-    rows = [np.concatenate([
+    raw_row = np.concatenate([
         np.array(Image.fromarray(frame).resize((size, size), Image.NEAREST)) for frame in frames
-    ], axis=1)]
+    ], axis=1)
 
+    # encoding is the slow part, so it happens once and every cluster count reuses it
+    features = {}
     for encoder_name in cfg.encoders:
-        features = encode(encoder_name, frames, cfg.resize_to, cfg.interpolation)
-        print(f"{encoder_name}: {tuple(features.shape)}")
+        features[encoder_name] = encode(encoder_name, frames, cfg.resize_to, cfg.interpolation)
+        print(f"{encoder_name}: {tuple(features[encoder_name].shape)}")
 
-        # clustered jointly over all frames, so a colour means the same thing everywhere and
-        # an object keeping its colour across frames is itself a sign the features hold up
-        num_frames, num_tokens, _ = features.shape
-        assignment = kmeans(features.reshape(num_frames * num_tokens, -1), cfg.num_clusters)
-        assignment = assignment.reshape(num_frames, num_tokens).numpy()
+    for num_clusters in cfg.num_clusters:
+        rows = [("raw", raw_row)]
 
-        rows.append(np.concatenate([
-            cluster_overlay(frame, frame_assignment, size)
-            for frame, frame_assignment in zip(frames, assignment)
-        ], axis=1))
+        for encoder_name, encoder_features in features.items():
+            num_frames, num_tokens, _ = encoder_features.shape
+            flat = encoder_features.reshape(num_frames * num_tokens, -1)
 
-    Image.fromarray(np.concatenate(rows, axis=0)).save(cfg.out)
-    print(f"saved {cfg.out}, rows: raw, " + ", ".join(cfg.encoders))
+            # clustered jointly over all frames, so a colour means the same thing everywhere
+            # and an object holding its colour across frames says the features are stable
+            assignment = kmeans(flat, num_clusters).reshape(num_frames, num_tokens).numpy()
+
+            short_name = encoder_name.split("-Tokenizer-")[-1].split("-vitb")[0]
+            rows.append((f"{short_name} k={num_clusters}", np.concatenate([
+                cluster_overlay(frame, frame_assignment, size)
+                for frame, frame_assignment in zip(frames, assignment)
+            ], axis=1)))
+
+        image = np.concatenate([
+            np.concatenate([label(text, row.shape[0]), row], axis=1) for text, row in rows
+        ], axis=0)
+
+        out = cfg.out if len(cfg.num_clusters) == 1 else \
+            cfg.out.with_name(f"{cfg.out.stem}_k{num_clusters}{cfg.out.suffix}")
+        Image.fromarray(image).save(out)
+        print(f"saved {out}, rows: " + ", ".join(text for text, _ in rows))
 
 
 if __name__ == "__main__":
