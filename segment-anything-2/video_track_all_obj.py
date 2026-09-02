@@ -188,7 +188,9 @@ class Config:
         new_obj_detection_interval=5,
         use_mask_merge=False,
         background_color=((227, 228, 222), (237, 237, 239), (233, 206, 176), (200, 184, 168)),
-        background_tolerance=16,
+        # 24 clears the jpeg halo where sprite and floor colours blend; the nearest sprite
+        # colour, the crate timber, sits 32 away, so this is as wide as the tolerance goes
+        background_tolerance=24,
     ))
     rt1_cfg: SamConfig = field(default_factory=lambda: SamConfig(
         pred_iou_thresh=0.8,
