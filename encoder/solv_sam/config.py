@@ -57,6 +57,9 @@ class SolvSamConfig:
     decode_use_mask: bool = True
     decoder_depth: int = 4
 
+    feat_loss_weight: float = 1.0
+    rgb_loss_weight: float = 1.0
+
     # === SAM Scheduler Related Parameters ===
     # ratio of SAM masks that are not dropped, set to 1.0 to disable SAM mask dropout
     no_drop_ratio: float = 0.1
@@ -104,6 +107,12 @@ class SolvSamConfig:
         assert self.log_schedule_k > 0
         assert self.schedule_start_epoch < self.schedule_end_epoch
         assert 0 <= self.no_drop_ratio <= 1
+
+        assert self.feat_loss_weight >= 0 and self.rgb_loss_weight >= 0
+        if self.feat_loss_weight == 0 and self.rgb_loss_weight == 0:
+            raise ValueError(
+                "feat_loss_weight and rgb_loss_weight are both zero, nothing would train"
+            )
 
         if not self.load_sam_masks:
             if self.decode_segmentation:

@@ -119,13 +119,22 @@ def train_epoch(args, encoder, model, optimizer, scheduler, train_dataloader, nu
             enc_features = encoder(frames)
             assert torch.isfinite(enc_features).all()
 
+        # the rgb branch pushes every batch through the frozen decoder, so skip it once the
+        # term is weighted out. The condition deliberately ignores rank: ranks that disagree
+        # would build different graphs and leave DDP reducing gradients nobody produced.
+        visualizing = num_iter % args.train_visualize_freq == 0
+        decode_rgb = args.rgb_loss_weight > 0 or visualizing
+
         enc_features = enc_features.to(torch.float32)                                           # (bs, num_tokens, token_dim)
         reconstruction = model(
             enc_features,
             mask=input_patch_masks if args.encode_use_mask else None,
+            decode_rgb=decode_rgb,
         )
 
         loss_terms = compute_loss(frames, masks, enc_features, reconstruction, patch_size)
+        loss_terms["enc_feat_loss"] = loss_terms["enc_feat_loss"] * args.feat_loss_weight
+        loss_terms["rgb_rec_loss"] = loss_terms["rgb_rec_loss"] * args.rgb_loss_weight
         attn_loss = loss_terms["attn_loss"] * args.attn_loss_weight
 
         # if all patches are dropped, do not compute attn loss, as slots can be permuted in any way
@@ -151,7 +160,7 @@ def train_epoch(args, encoder, model, optimizer, scheduler, train_dataloader, nu
             for loss_term_name, loss_term_value in loss_terms.items():
                 run_logger.log_metric(f"batch/{loss_term_name}", loss_term_value.item(), num_iter)
 
-            if num_iter % args.train_visualize_freq == 0:
+            if visualizing:
                 num_digits = len(str(total_iter))
                 fname = f"train/iter_{num_iter:0{num_digits}d}.png"
                 log_mask_visualization(
@@ -325,7 +334,13 @@ def val_epoch(args, encoder, model, val_dataloader, evaluator, epoch, use_mask=T
     # === Evaluation Results ====
     if not args.load_sam_masks:
         # rank checkpoints by the reconstruction objective instead of mIoU
-        val_loss = np.mean([loss["enc_feat_loss"] + loss["rgb_rec_loss"] for loss in losses])
+        # weighted as training weights them, so the checkpoint picked is the best one under
+        # the objective actually in force rather than under a sum nobody optimised
+        val_loss = np.mean([
+            args.feat_loss_weight * loss["enc_feat_loss"]
+            + args.rgb_loss_weight * loss["rgb_rec_loss"]
+            for loss in losses
+        ])
 
         print("\n=== Results ===")
         print(f"\tval reconstruction loss: {val_loss:.5f} (segmentation metrics need SAM masks)\n")
@@ -365,25 +380,32 @@ def compute_loss(frames, gt_segmentations, enc_features, reconstruction, patch_s
     enc_feat_abs_error = (enc_features - enc_feat_rec).abs().mean()
     enc_feat_rel_error = enc_feat_abs_error / enc_features.std(dim=0).mean()
 
-    # === rgb loss ===
-    rgb_rec = reconstruction["rgb_rec"]                                                     # (bs, C, h, w)
-    rgb_rec_flat = rearrange(rgb_rec, "b c h w -> (b h w) c")                               # (bs * h * w, C)
-    frames_flat = rearrange(frames, "b c h w -> (b h w) c")                                 # (bs * h * w, C)
-
     if gt_segmentations is None:
         # nothing marks a pixel as belonging to no object, so reconstruct all of them
         masks_flat = pixel_valid = None
-        rgb_rec_loss = F.mse_loss(rgb_rec_flat, frames_flat)
     else:
         masks_flat = rearrange(gt_segmentations, "b s h w -> (b h w) s")                    # (bs * h * w, num_slots)
         pixel_valid = masks_flat.any(dim=1)                                                 # (bs * h * w)
-        rgb_rec_loss = F.mse_loss(rgb_rec_flat[pixel_valid], frames_flat[pixel_valid])
+
+    # === rgb loss ===
+    if "rgb_rec" not in reconstruction:
+        # the caller skipped the rgb decoder because the term is weighted out
+        rgb_rec_loss = torch.zeros((), device=frames.device, dtype=enc_feat_loss.dtype)
+    else:
+        rgb_rec = reconstruction["rgb_rec"]                                                 # (bs, C, h, w)
+        rgb_rec_flat = rearrange(rgb_rec, "b c h w -> (b h w) c")                           # (bs * h * w, C)
+        frames_flat = rearrange(frames, "b c h w -> (b h w) c")                             # (bs * h * w, C)
+
+        if pixel_valid is None:
+            rgb_rec_loss = F.mse_loss(rgb_rec_flat, frames_flat)
+        else:
+            rgb_rec_loss = F.mse_loss(rgb_rec_flat[pixel_valid], frames_flat[pixel_valid])
 
     # === attn loss ===
     if gt_segmentations is None:
         # attention outside the ground truth is undefined without it; selecting on an
         # all-true mask would average an empty tensor into a NaN that survives any weight
-        attn_loss = torch.zeros((), device=frames.device, dtype=rgb_rec_loss.dtype)
+        attn_loss = torch.zeros((), device=frames.device, dtype=enc_feat_loss.dtype)
     else:
         patch_masks = rearrange(gt_segmentations, "b s (h p1) (w p2) -> b s (h w) (p1 p2)", p1=patch_size, p2=patch_size)
         patch_masks = patch_masks.any(dim=-1)                                               # (bs, num_slots, num_tokens)

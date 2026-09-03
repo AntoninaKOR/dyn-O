@@ -494,7 +494,7 @@ class SOLV_SAM(nn.Module):
 
         self.rgb_dec = RgbDecoder(args, encoder)
 
-    def forward(self, frames, mask=None):
+    def forward(self, frames, mask=None, decode_rgb=True):
 
         # :arg frames: (bs, num_tokens, token_dim)
         # :arg mask:   (bs, num_slots, num_tokens)
@@ -507,6 +507,7 @@ class SOLV_SAM(nn.Module):
         reconstruction = self.decode(
             slots,
             mask=mask if self.decode_use_mask else None,
+            decode_rgb=decode_rgb,
         )
         reconstruction["attn"] = attn
         reconstruction["unweighted_attn"] = unweighted_attn
