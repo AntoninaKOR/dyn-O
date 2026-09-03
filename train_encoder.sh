@@ -14,6 +14,12 @@ UPLOAD_IMAGES=True
 EXP_NAME="dynO"
 RUN_NAME="encoder_homegrid"
 
+# to continue an interrupted run, point this at its checkpoint_latest.pt or
+# checkpoint_epoch_N.pt. Weights, optimiser and schedule are restored and the epoch is
+# derived from the iteration count. A bare relaunch cannot find it on its own, since the
+# run directory carries the launch timestamp.
+RESUME_FROM=""
+
 # data
 DATA_ROOT="/data/minari"
 DATASET_ID="dyno"
@@ -29,6 +35,9 @@ ENCODE_USE_MASK=False
 NO_DROP_RATIO=0.1
 ATTN_LOSS_WEIGHT=0.0
 
+FEAT_LOSS_WEIGHT=1.0
+RGB_LOSS_WEIGHT=1.0
+
 # encoder
 # homegrid frames hold 5 entities on average and at most 10, floor and walls included;
 # without masks the decoder reconstructs those too, so they occupy slots as well
@@ -42,9 +51,12 @@ BATCH_SIZE=64                               # global; the dataloader splits it a
 # physical GPUs to run on, comma separated: "0", "3", "2,5", ...
 GPU_IDS="0"
 
-NUM_EPOCHS=10
-SCHEDULE_START_EPOCH=1
-SCHEDULE_END_EPOCH=9
+NUM_EPOCHS=50
+
+# window over which SAM masks are faded out, kept at 10% to 90% of the run. Inert while
+# LOAD_SAM_MASKS is False, since that pins no_drop_ratio to 1.0 and skips the schedule
+SCHEDULE_START_EPOCH=5
+SCHEDULE_END_EPOCH=45
 
 # tyro renders plain bools as a pair of flags rather than as a flag taking a value
 if [ "${LOAD_SAM_MASKS}" = "True" ]; then
@@ -57,6 +69,12 @@ if [ "${UPLOAD_IMAGES}" = "True" ]; then
   UPLOAD_IMAGES_FLAG="--upload_images"
 else
   UPLOAD_IMAGES_FLAG="--no_upload_images"
+fi
+
+if [ -n "${RESUME_FROM}" ]; then
+  RESUME_FLAG="--checkpoint_path ${RESUME_FROM}"
+else
+  RESUME_FLAG=""
 fi
 
 GPUS=$(awk -F, '{print NF}' <<< "${GPU_IDS}")
@@ -77,6 +95,9 @@ CUDA_VISIBLE_DEVICES=${GPU_IDS} torchrun --master_port=${MASTER_PORT:-12345} --n
   --encode_use_mask ${ENCODE_USE_MASK} \
   --no_drop_ratio ${NO_DROP_RATIO} \
   --attn_loss_weight ${ATTN_LOSS_WEIGHT} \
+  --feat_loss_weight ${FEAT_LOSS_WEIGHT} \
+  --rgb_loss_weight ${RGB_LOSS_WEIGHT} \
   --num_epochs ${NUM_EPOCHS} \
   --schedule_start_epoch ${SCHEDULE_START_EPOCH} \
-  --schedule_end_epoch ${SCHEDULE_END_EPOCH}
+  --schedule_end_epoch ${SCHEDULE_END_EPOCH} \
+  ${RESUME_FLAG}
