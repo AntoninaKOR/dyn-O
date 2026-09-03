@@ -7,6 +7,8 @@ pillow==10.2.0
 h5py
 
 huggingface_hub
+# only needed for video_track_all_obj.py --visualize; 5.x requires numpy>=2, which breaks procgen/gym3/numba
+opencv-python-headless<5
 
 -e segment-anything-2
 
