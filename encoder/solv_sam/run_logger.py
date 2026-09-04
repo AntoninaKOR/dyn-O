@@ -129,10 +129,16 @@ class CometLogger(RunLogger):
                 "or run `comet login` to write ~/.comet.config."
             )
 
-        self._experiment = comet_ml.start(
-            project_name=args.exp_name,
-            experiment_config=comet_ml.ExperimentConfig(name=run_name),
-        )
+        if args.comet_experiment_key:
+            # no ExperimentConfig here, it would rename the experiment being continued
+            self._experiment = comet_ml.start(
+                experiment_key=args.comet_experiment_key, mode="get"
+            )
+        else:
+            self._experiment = comet_ml.start(
+                project_name=args.exp_name,
+                experiment_config=comet_ml.ExperimentConfig(name=run_name),
+            )
         self._experiment.log_parameters(dataclasses.asdict(args))
         self._upload_images = args.upload_images
 

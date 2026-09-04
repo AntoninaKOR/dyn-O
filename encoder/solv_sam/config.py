@@ -18,6 +18,10 @@ class SolvSamConfig:
     # written under ckpt_path either way, so uploading them is optional.
     upload_images: bool = True
 
+    # Comet opens a new experiment per launch. Set this to the hex id from a previous
+    # experiment's url to have a resumed run continue the same curves.
+    comet_experiment_key: str = ""
+
     # === Data Related Parameters ===
     dataset: str = "procgen_minari"
     root: str = field(default="/scratch/cluster/zzwang_new/procgen_data")

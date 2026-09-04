@@ -20,6 +20,9 @@ RUN_NAME="encoder_homegrid"
 # run directory carries the launch timestamp.
 RESUME_FROM=""
 
+# empty starts a fresh experiment
+COMET_EXPERIMENT_KEY=""
+
 # data
 DATA_ROOT="/data/minari"
 DATASET_ID="dyno"
@@ -83,6 +86,7 @@ CUDA_VISIBLE_DEVICES=${GPU_IDS} torchrun --master_port=${MASTER_PORT:-12345} --n
   --exp_name ${EXP_NAME} \
   --run_name ${RUN_NAME} \
   --logger ${LOGGER} \
+  --comet_experiment_key "${COMET_EXPERIMENT_KEY}" \
   --num_slots ${NUM_SLOTS} \
   --encoder ${ENCODER} \
   --resize_to ${RESIZE_TO} \
